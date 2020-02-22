@@ -1,6 +1,10 @@
 -- | This module performs basic inlining of known functions
 module CodeGen.IL.Optimizer.Inliner
-  ( inlineCommonValues
+  ( etaConvert
+  , unThunk
+  , evaluateIifes
+  , inlineCommonValues
+  , inlineVariables
   , inlineCommonOperators
   , inlineFnComposition
   , inlineUnsafeCoerce
@@ -18,8 +22,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Language.PureScript.PSString (PSString, decodeString, mkString)
-import Language.PureScript.CoreImp.AST
-import Language.PureScript.CoreImp.Optimizer.Common hiding (isDict, isDict')
+--import Language.PureScript.CoreImp.AST
+import CodeGen.IL.AST
+--import Language.PureScript.CoreImp.Optimizer.Common hiding (isDict, isDict')
+import Language.PureScript.CoreImp.Optimizer.Common (applyAll)
 import Language.PureScript.AST (SourceSpan(..))
 import qualified Language.PureScript.Constants as C
 
@@ -37,6 +43,40 @@ shouldInline (StringLiteral _ _) = True
 shouldInline (BooleanLiteral _ _) = True
 shouldInline (Indexer _ index val) = shouldInline index && shouldInline val
 shouldInline _ = False
+
+etaConvert :: AST -> AST
+etaConvert = everywhere convert
+  where
+  convert :: AST -> AST
+  convert (Block ss [Return _ (App _ (Function _ _ Nothing idents block@(Block _ body)) args)])
+    | all shouldInline args &&
+      not (any (`isRebound` block) (map (\t->Var Nothing (snd t)) idents)) &&
+      not (any (`isRebound` block) args)
+      = Block ss (map (replaceIdents (zipWith (\t a -> (snd t, a)) idents args)) body)
+  convert (Function _ _ Nothing [] (Block _ [Return _ (App _ fn [])])) = fn
+  convert js = js
+
+
+unThunk :: AST -> AST
+unThunk = everywhere convert
+  where
+  convert :: AST -> AST
+  convert (Block ss []) = Block ss []
+  convert (Block ss jss) =
+    case last jss of
+      Return _ (App _ (Function _ (TypeSpecSeq Auto Nothing) Nothing [] (Block _ body)) []) -> Block ss $ init jss ++ body
+      _ -> Block ss jss
+  convert js = js
+
+evaluateIifes :: AST -> AST
+evaluateIifes = everywhere convert
+  where
+  convert :: AST -> AST
+  convert (App _ (Function _ _ Nothing [] (Block _ [Return _ ret])) []) = ret
+  convert (App _ (Function _ _ Nothing idents (Block _ [Return ss ret])) [])
+    | not (any (\t -> (snd t) `isReassigned` ret) idents) =
+        replaceIdents (map (\t -> ((snd t), Var ss C.undefined)) idents) ret
+  convert js = js
 
 inlineCommonValues :: AST -> AST
 inlineCommonValues = everywhere convert
@@ -63,6 +103,16 @@ inlineCommonValues = everywhere convert
   fnSubtract = (C.dataRing, C.sub)
   fnNegate = (C.dataRing, C.negate)
   intOp ss op (_, d) x y = Binary ss op (unbox x d) (unbox y d)
+
+inlineVariables :: AST -> AST
+inlineVariables = everywhere $ removeFromBlock go
+  where
+  go :: [AST] -> [AST]
+  go [] = []
+  go (VariableIntroduction _ var (Just js) : sts)
+    | shouldInline js && not (any (isReassigned var) sts) && not (any (isRebound js) sts) && not (any (isUpdated var) sts) =
+      go (map (replaceIdent var js) sts)
+  go (s:sts) = s : go sts
 
 inlineCommonOperators :: AST -> AST
 inlineCommonOperators = everywhereTopDown $ applyAll $
@@ -154,16 +204,16 @@ inlineCommonOperators = everywhereTopDown $ applyAll $
 
   mkFn :: Int -> AST -> AST
   mkFn = mkFn' C.dataFunctionUncurried C.mkFn $ \ss1 ss2 ss3 args il ->
-    Function ss1 Nothing args (Block ss2 [Return ss3 il])
+    Function ss1 (TypeSpecSeq Auto Nothing) Nothing args (Block ss2 [Return ss3 il])
 
   mkEffFn :: Text -> Text -> Int -> AST -> AST
   mkEffFn modName fnName = mkFn' modName fnName $ \ss1 ss2 ss3 args il ->
-    Function ss1 Nothing args (Block ss2 [Return ss3 (App ss3 il [])])
+    Function ss1 (TypeSpecSeq Auto Nothing) Nothing args (Block ss2 [Return ss3 (App ss3 il [])])
 
-  mkFn' :: Text -> Text -> (Maybe SourceSpan -> Maybe SourceSpan -> Maybe SourceSpan -> [Text] -> AST -> AST) -> Int -> AST -> AST
+  mkFn' :: Text -> Text -> (Maybe SourceSpan -> Maybe SourceSpan -> Maybe SourceSpan -> [(TypeSpecSeq,Text)] -> AST -> AST) -> Int -> AST -> AST
   mkFn' modName fnName res 0 = convert where
     convert :: AST -> AST
-    convert (App _ mkFnN [Function s1 Nothing [_] (Block s2 [Return s3 il])]) | isNFn modName fnName 0 mkFnN =
+    convert (App _ mkFnN [Function s1 (TypeSpecSeq Auto Nothing) Nothing [_] (Block s2 [Return s3 il])]) | isNFn modName fnName 0 mkFnN =
       res s1 s2 s3 [] il
     convert other = other
   mkFn' modName fnName res n = convert where
@@ -173,9 +223,9 @@ inlineCommonOperators = everywhereTopDown $ applyAll $
         Just (args, [Return ss' ret]) -> res ss ss ss' args ret
         _ -> orig
     convert other = other
-    collectArgs :: Int -> [Text] -> AST -> Maybe ([Text], [AST])
-    collectArgs 1 acc (Function _ Nothing [oneArg] (Block _ il)) | length acc == n - 1 = Just (reverse (oneArg : acc), il)
-    collectArgs m acc (Function _ Nothing [oneArg] (Block _ [Return _ ret])) = collectArgs (m - 1) (oneArg : acc) ret
+    collectArgs :: Int -> [(TypeSpecSeq,Text)] -> AST -> Maybe ([(TypeSpecSeq,Text)], [AST])
+    collectArgs 1 acc (Function _ _ Nothing [oneArg] (Block _ il)) | length acc == n - 1 = Just (reverse (oneArg : acc), il)
+    collectArgs m acc (Function _ _ Nothing [oneArg] (Block _ [Return _ ret])) = collectArgs (m - 1) (oneArg : acc) ret
     collectArgs _ _   _ = Nothing
 
   isNFn :: Text -> Text -> Int -> AST -> Bool
@@ -192,7 +242,7 @@ inlineCommonOperators = everywhereTopDown $ applyAll $
                                                       else App ss f args)
   runEffFn :: Text -> Text -> Int -> AST -> AST
   runEffFn modName fnName = runFn' modName fnName $ \ss fn acc ->
-    Function ss Nothing [] (Block ss [Return ss (App ss fn acc)])
+    Function ss (TypeSpecSeq Auto Nothing) Nothing [] (Block ss [Return ss (App ss fn acc)])
 
   runFn' :: Text -> Text -> (Maybe SourceSpan -> AST -> [AST] -> AST) -> Int -> AST -> AST
   runFn' modName runFnName res n = convert where
@@ -234,10 +284,10 @@ inlineFnComposition = everywhereTopDownM convert where
   convert other = return other
 
   mkApps :: Maybe SourceSpan -> [Either AST (Text, AST)] -> Text -> AST
-  mkApps ss fns a = App ss (Function ss Nothing [] (Block ss $ vars <> [Return Nothing comp])) []
+  mkApps ss fns a = App ss (Function ss (TypeSpecSeq Auto Nothing) Nothing [] (Block ss $ vars <> [Return Nothing comp])) []
     where
     vars = uncurry (VariableIntroduction ss) . fmap Just <$> rights fns
-    comp = Function ss Nothing [a] (Block ss [Return Nothing apps])
+    comp = Function ss (TypeSpecSeq Auto Nothing) Nothing [((TypeSpecSeq Auto Nothing),a)] (Block ss [Return Nothing apps])
     apps = foldr (\fn acc -> App ss (mkApp fn) [acc]) (Var ss a) fns
 
   mkApp :: Either AST (Text, AST) -> AST

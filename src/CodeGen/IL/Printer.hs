@@ -25,7 +25,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Language.PureScript.AST (SourceSpan(..))
-import Language.PureScript.CoreImp.AST
+--import Language.PureScript.CoreImp.AST
+import CodeGen.IL.AST
 import Language.PureScript.Comments
 import Language.PureScript.Crash
 import Language.PureScript.Names (Ident, runIdent)
@@ -103,9 +104,9 @@ literals = mkPattern' match'
     , intercalate (emit ", ") <$> forM args prettyPrintIL'
     , return $ emit ")"
     ]
-  match (Function _ (Just name) [] (Block _ [Return _ ret]))
+  match (Function _ _ (Just name) [] (Block _ [Return _ ret]))
     | isLiteral ret = mconcat <$> sequence
-    [ return $ emit "auto "
+    [ return $ emit "XTYPEX " -- $ prettyPrintIL1 ret <> " " -- "auto "
     , return $ emit "PS("
     , return $ emit name
     , return $ emit ")"
@@ -116,7 +117,7 @@ literals = mkPattern' match'
           return $ indentString <> emit staticValueBegin
     , withIndent $ do
         case ret of
-          Function _ Nothing args body -> mconcat <$> sequence
+          Function _ _ Nothing args body -> mconcat <$> sequence
             [ return $ emit "[]("
             , return $ emit $ intercalate ", " (renderArg <$> args)
             , return $ emit ") -> boxed "
@@ -130,7 +131,7 @@ literals = mkPattern' match'
           return $ indentString <> emit staticValueEnd
     , return $ emit "\n}"
     ]
-  match (Function _ (Just name) [] ret) = mconcat <$> sequence
+  match (Function _ _ (Just name) [] ret) = mconcat <$> sequence
     [ return $ emit "auto "
     , return $ emit "PS("
     , return $ emit name
@@ -138,7 +139,7 @@ literals = mkPattern' match'
     , return $ emit "() -> boxed "
     , prettyPrintIL' ret
     ]
-  match (Function _ name args ret) = mconcat <$> sequence
+  match (Function _ _ name args ret) = mconcat <$> sequence
     [ return $ emit captures
     , return $ emit "("
     , return $ emit $ intercalate ", " (render <$> args)
@@ -147,7 +148,7 @@ literals = mkPattern' match'
     ]
     where
     (captures, render)
-      | name == Just tcoLoop = ("[&]", renderArgByVal)
+      | name == Just tcoLoop = ("[&]", renderArg)
       | otherwise = ("[=]", renderArg)
   match (Indexer _ (Var _ name) (Var _ "")) = mconcat <$> sequence
     [ prettyPrintIL' (Var Nothing name)
@@ -474,22 +475,28 @@ implFooterSource mn foreigns =
     \}\n\n\
     \"
 
-varDecl :: Text
-varDecl = "const boxed"
+constSpec :: ConstSpec -> Text
+constSpec Const = "const"
 
-varRefDecl :: Text
-varRefDecl = varDecl <> "&"
+refSpec :: RefSpec -> Text
+refSpec Pointer = "*"
+refSpec (LvalueRef (Just cs)) = constSpec cs <> "&"
+refSpec (LvalueRef Nothing) = "&"
 
-renderArg' :: Text -> Text -> Text
-renderArg' decl arg
-  | arg == unusedName = decl
-  | otherwise = decl <> " " <> arg
+typeSpec :: TypeSpec -> Text
+typeSpec (Ident (Quali _ t)) = t
+typeSpec Auto = "auto"
+typeSpec (TemplateArg t) = t
+typeSpec Void = "void"
 
-renderArg :: Text -> Text
-renderArg = renderArg' varRefDecl
+typeSpecSeq :: TypeSpecSeq -> Text
+typeSpecSeq (TypeSpecSeq ts (Just rs)) = refSpec rs <> typeSpec ts
+typeSpecSeq (TypeSpecSeq ts Nothing) = typeSpec ts
 
-renderArgByVal :: Text -> Text
-renderArgByVal = renderArg' varDecl
+renderArg :: (TypeSpecSeq,Text) -> Text
+renderArg (ts,ident)
+  | ident == unusedName = typeSpecSeq ts
+  | otherwise = typeSpecSeq ts <> " " <> ident
 
 foreignDict :: Text
 foreignDict = "foreign"

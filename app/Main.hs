@@ -12,6 +12,8 @@ import Data.Char
 import Data.FileEmbed (embedFile)
 import Data.List (delete, isPrefixOf, partition)
 import Data.Maybe
+import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.Monoid ((<>))
 import Data.Version
 import Control.Monad.Supply
@@ -34,6 +36,8 @@ import Development.GitRev
 import Language.PureScript.AST.Literals
 import Language.PureScript.CoreFn
 import Language.PureScript.CoreFn.FromJSON
+import Language.PureScript.Externs
+import Language.PureScript.Environment
 
 import CodeGen.IL
 import CodeGen.IL.Common
@@ -52,6 +56,16 @@ jsonToModule value =
     Success (_, r) -> r
     _ -> error "failed"                  
 
+readExtFile :: FilePath -> IO ExternsFile
+readExtFile path = do
+  m <- decodeFileStrict' path
+  case m of
+    Just e -> return e
+              --if (externsIsCurrentVersion e) 
+              --then return e
+              --else error $ "Version mismatch for " <> path
+    _ -> error $ "Error loading " <> path
+    
 main :: IO ()
 main = do
   args <- getArgs
@@ -81,26 +95,33 @@ main = do
           return ()
 
 generateCode :: [String] -> FilePath -> FilePath -> IO ()
-generateCode opts baseOutpath jsonFile = do
-  jsonModTime <- getModificationTime jsonFile
-  let filepath = takeDirectory jsonFile
+generateCode opts baseOutpath cfnJsonFile = do
+  let filepath = takeDirectory cfnJsonFile
+      extJsonFile = filepath </> "externs.json"
       dirparts = splitDirectories $ filepath
       mname = (\c -> if c == '.' then '_' else c) <$> last dirparts
       basedir = joinPath $ init dirparts
       possInterfaceFilename = basedir </> outdir </> mddir </> interfaceFileName mname
   exists <- doesFileExist possInterfaceFilename
+  cfnJsonModTime <- getModificationTime cfnJsonFile
+  extJsonModTime <- getModificationTime extJsonFile
   if exists
     then do
       modTime <- getModificationTime possInterfaceFilename
-      when (modTime < jsonModTime) $
-        transpile opts baseOutpath jsonFile
-    else transpile opts baseOutpath jsonFile
+      when ((modTime < cfnJsonModTime) || (modTime < extJsonModTime)) $
+        transpile opts baseOutpath cfnJsonFile extJsonFile
+    else transpile opts baseOutpath cfnJsonFile extJsonFile
 
-transpile :: [String] -> FilePath -> FilePath -> IO ()
-transpile opts baseOutpath jsonFile = do
-  jsonText <- T.decodeUtf8 <$> B.readFile jsonFile
-  let module' = jsonToModule $ parseJson jsonText
-  ((interface, foreigns, asts, implHeader, implFooter), _) <- runSupplyT 5 (moduleToIL module' Nothing)
+emptyEnvironment :: Environment
+emptyEnvironment = Environment M.empty M.empty M.empty M.empty M.empty M.empty S.empty
+
+transpile :: [String] -> FilePath -> FilePath -> FilePath -> IO ()
+transpile opts baseOutpath cfnJsonFile extJsonFile = do
+  cfnJsonText <- T.decodeUtf8 <$> B.readFile cfnJsonFile
+  extFile <- readExtFile extJsonFile
+  let module' = jsonToModule $ parseJson cfnJsonText
+      env = applyExternsFileToEnvironment extFile emptyEnvironment 
+  ((interface, foreigns, asts, implHeader, implFooter), _) <- runSupplyT 5 (moduleToIL module' env)
   let mn = moduleNameToIL $ moduleName module'
       implementation = prettyPrintIL asts
       interfacePath = baseOutpath </> interfaceFileName (T.unpack mn)

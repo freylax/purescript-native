@@ -5,14 +5,13 @@ import Prelude.Compat
 
 import Control.Monad.Supply.Class (MonadSupply)
 import Data.Text (Text)
-import Language.PureScript.CoreImp.AST
-import Language.PureScript.CoreImp.Optimizer.Blocks
-import Language.PureScript.CoreImp.Optimizer.Common hiding (isDict)
-import Language.PureScript.CoreImp.Optimizer.Inliner (etaConvert, evaluateIifes, inlineVariables, unThunk)
-import Language.PureScript.CoreImp.Optimizer.Unused
-
+import Language.PureScript.CoreImp.Optimizer.Common (applyAll)
+import CodeGen.IL.AST
 import CodeGen.IL.Common (unusedName)
-import CodeGen.IL.Optimizer.Inliner
+import CodeGen.IL.Optimizer.Blocks 
+import CodeGen.IL.Optimizer.Unused
+import CodeGen.IL.Optimizer.Common (removeFromBlock,isUsed)
+import CodeGen.IL.Optimizer.Inliner 
 import CodeGen.IL.Optimizer.MagicDo
 import CodeGen.IL.Optimizer.TCO
 

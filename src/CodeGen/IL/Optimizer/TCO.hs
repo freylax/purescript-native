@@ -4,7 +4,8 @@ import Prelude.Compat
 
 import Data.Text (Text)
 import Data.Monoid ((<>))
-import Language.PureScript.CoreImp.AST
+--import Language.PureScript.CoreImp.AST
+import CodeGen.IL.AST
 import Language.PureScript.AST.SourcePos (SourceSpan)
 import Safe (headDef, tailSafe)
 import CodeGen.IL.Common
@@ -29,14 +30,14 @@ tco mn = everywhere convert where
   tcoResult = "_tco_result_"
 
   convert :: AST -> AST
-  convert fn@(Function ss (Just name) args _)
+  convert fn@(Function ss _ (Just name) args _)
       | isTailRecursive name body'
       = replace (toLoop name outerArgs innerArgs body')
     where
       innerArgs = headDef [] argss
       outerArgs = concat . reverse $ tailSafe argss
       (argss, body', replace) = collectAllFunctionArgs [] id fn
-  convert (Assignment ss (Var _ name) fn@(Function _ Nothing _ _))
+  convert (Assignment ss (Var _ name) fn@(Function _ _ Nothing _ _))
       | isTailRecursive name body'
       = Assignment ss (Var ss name) (replace (toLoop name outerArgs innerArgs body'))
     where
@@ -45,18 +46,18 @@ tco mn = everywhere convert where
       (argss, body', replace) = collectAllFunctionArgs [] id fn
   convert js = js
 
-  collectAllFunctionArgs :: [[Text]] -> (AST -> AST) -> AST -> ([[Text]], AST, AST -> AST)
-  collectAllFunctionArgs allArgs f (Function s1 ident args (Block s2 (body@(Return _ _):_))) =
-    collectAllFunctionArgs (args : allArgs) (\b -> f (Function s1 ident (map copyVar args) (Block s2 [b]))) body
+  collectAllFunctionArgs :: [[(TypeSpecSeq,Text)]] -> (AST -> AST) -> AST -> ([[(TypeSpecSeq,Text)]], AST, AST -> AST)
+  collectAllFunctionArgs allArgs f (Function s1 ret ident args (Block s2 (body@(Return _ _):_))) =
+    collectAllFunctionArgs (args : allArgs) (\b -> f (Function s1 ret ident (map (\t -> (fst t,copyVar $ snd t)) args) (Block s2 [b]))) body
   -- Handle RecLetDecl weak assignment case
-  collectAllFunctionArgs allArgs f (Function s1 ident args (Block s2 (Var{}:body@(Return _ _):_))) =
-    collectAllFunctionArgs (args : allArgs) (\b -> f (Function s1 ident (map copyVar args) (Block s2 [b]))) body
-  collectAllFunctionArgs allArgs f (Function ss ident args body@(Block _ _)) =
-    (args : allArgs, body, f . Function ss ident (map copyVar args))
-  collectAllFunctionArgs allArgs f (Return s1 (Function s2 ident args (Block s3 [body]))) =
-    collectAllFunctionArgs (args : allArgs) (\b -> f (Return s1 (Function s2 ident (map copyVar args) (Block s3 [b])))) body
-  collectAllFunctionArgs allArgs f (Return s1 (Function s2 ident args body@(Block _ _))) =
-    (args : allArgs, body, f . Return s1 . Function s2 ident (map copyVar args))
+  collectAllFunctionArgs allArgs f (Function s1 ret ident args (Block s2 (Var{}:body@(Return _ _):_))) =
+    collectAllFunctionArgs (args : allArgs) (\b -> f (Function s1 ret ident (map (\t -> (fst t,copyVar $ snd t)) args) (Block s2 [b]))) body
+  collectAllFunctionArgs allArgs f (Function ss ret ident args body@(Block _ _)) =
+    (args : allArgs, body, f . Function ss ret ident (map (\t -> (fst t,copyVar $ snd t)) args))
+  collectAllFunctionArgs allArgs f (Return s1 (Function s2 _ ident args (Block s3 [body]))) =
+    collectAllFunctionArgs (args : allArgs) (\b -> f (Return s1 (Function s2 (TypeSpecSeq Auto Nothing) ident (map (\t -> (fst t,copyVar (snd t))) args) (Block s3 [b])))) body
+  collectAllFunctionArgs allArgs f (Return s1 (Function s2 _ ident args body@(Block _ _))) =
+    (args : allArgs, body, f . Return s1 . Function s2 (TypeSpecSeq Auto Nothing) ident (map (\t -> (fst t,copyVar $ snd t)) args))
   collectAllFunctionArgs allArgs f body = (allArgs, body, f)
 
   isTailRecursive :: Text -> AST -> Bool
@@ -92,16 +93,16 @@ tco mn = everywhere convert where
     allInTailPosition _
       = False
 
-  toLoop :: Text -> [Text] -> [Text] -> AST -> AST
+  toLoop :: Text -> [(TypeSpecSeq,Text)] -> [(TypeSpecSeq,Text)] -> AST -> AST
   toLoop ident outerArgs innerArgs js =
       Block rootSS $
-        concatMap (\arg -> [ VariableIntroduction rootSS (tcoVar arg) (Just (Var rootSS (copyVar arg))) ]) (outerArgs ++ innerArgs) ++
+        concatMap (\arg -> [ VariableIntroduction rootSS (tcoVar (snd arg)) (Just (Var rootSS (copyVar (snd arg)))) ]) (outerArgs ++ innerArgs) ++
         [ Assignment rootSS (Var rootSS $ bool <> " " <> tcoDone) $ BooleanLiteral Nothing False
         , VariableIntroduction rootSS tcoResult Nothing
-        , Assignment rootSS (Var rootSS $ auto <> " " <> tcoLoop) (Function rootSS (Just tcoLoop) (outerArgs ++ innerArgs) (Block rootSS [loopify js]))
+        , Assignment rootSS (Var rootSS $ auto <> " " <> tcoLoop) (Function rootSS (TypeSpecSeq Auto Nothing) (Just tcoLoop) (outerArgs ++ innerArgs) (Block rootSS [loopify js]))
         , While rootSS (Unary Nothing Not (Var rootSS tcoDone))
             (Block rootSS
-              [(Assignment rootSS (Var rootSS tcoResult) (App rootSS (Var rootSS tcoLoop) ((map (Var rootSS . tcoVar) outerArgs) ++ (map (Var rootSS . tcoVar) innerArgs))))])
+              [(Assignment rootSS (Var rootSS tcoResult) (App rootSS (Var rootSS tcoLoop) ((map (\t -> (Var rootSS . tcoVar) (snd t)) outerArgs) ++ (map (\t -> (Var rootSS . tcoVar)(snd t)) innerArgs))))])
         , Return rootSS (Var rootSS tcoResult)
         ]
     where
@@ -115,9 +116,9 @@ tco mn = everywhere convert where
         in
           Block ss $
             zipWith (\val arg ->
-              Assignment ss (Var ss (tcoVar arg)) val) allArgumentValues outerArgs
+              Assignment ss (Var ss (tcoVar (snd arg))) val) allArgumentValues outerArgs
             ++ zipWith (\val arg ->
-              Assignment ss (Var ss (tcoVar arg)) val) (drop (length outerArgs) allArgumentValues) innerArgs
+              Assignment ss (Var ss (tcoVar (snd arg))) val) (drop (length outerArgs) allArgumentValues) innerArgs
             ++ [ ReturnNoResult ss ]
       | otherwise = Block ss [ markDone ss, Return ss ret ]
     loopify (ReturnNoResult ss) = Block ss [ markDone ss, ReturnNoResult ss ]

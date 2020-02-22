@@ -63,7 +63,7 @@ library:
     - ViewPatterns
 
 executables:
-  pscpp:
+  pscpptt:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
