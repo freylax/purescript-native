@@ -12,17 +12,17 @@ import CodeGen.IL.AST
 collapseNestedBlocks :: AST -> AST
 collapseNestedBlocks = everywhere collapse where
   collapse :: AST -> AST
-  collapse (Block ss sts) = Block ss (concatMap go sts)
+  collapse (Block sts) = Block (concatMap go sts)
   collapse js = js
   
   go :: AST -> [AST]
-  go (Block _ sts) = sts
+  go (Block sts) = sts
   go s = [s]
 
 collapseNestedIfs :: AST -> AST
 collapseNestedIfs = everywhere collapse where
   collapse :: AST -> AST
-  collapse (IfElse _ (BooleanLiteral _ True) (Block _ [js]) _) = js
-  collapse (IfElse s1 cond1 (Block _ [IfElse s2 cond2 body Nothing]) Nothing) =
-      IfElse s1 (Binary s2 And cond1 cond2) body Nothing
+  collapse (IfElse (BooleanLiteral True) (Block [js]) _) = js
+  collapse (IfElse cond1 (Block [IfElse cond2 body Nothing]) Nothing) =
+      IfElse (Binary And cond1 cond2) body Nothing
   collapse js = js

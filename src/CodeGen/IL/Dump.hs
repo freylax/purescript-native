@@ -70,7 +70,7 @@ printLiteralBinder (ArrayLiteral bs) =
 
 
 printExpr :: Expr a -> Text
-printExpr (Literal _ l) = printLiteralExpr l
+printExpr (Literal _ l) = "Literal(" <> printLiteralExpr l <> ")"
 printExpr (Constructor _ tn cn ids) =
   "Constructor("
   <> runProperName tn
@@ -92,7 +92,7 @@ printExpr (Let _ bs e) = "Let([" <> T.intercalate "," (map printBind bs)
                          <> "]," <> printExpr e <> ")"
 
 printLiteralExpr :: Literal (Expr a) -> Text
-printLiteralExpr (StringLiteral str) = prettyPrintString str
+printLiteralExpr (StringLiteral str) =  prettyPrintString str
 printLiteralExpr (CharLiteral c) = T.pack (show c)
 printLiteralExpr (NumericLiteral num) = either (T.pack . show) (T.pack . show) num
 printLiteralExpr (BooleanLiteral True) = "true"

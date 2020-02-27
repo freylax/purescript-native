@@ -37,23 +37,23 @@ import CodeGen.IL.Optimizer.Common
 -- Needs to be: { 0..toFixed(10); }
 -- Probably needs to be fixed in pretty-printer instead.
 shouldInline :: AST -> Bool
-shouldInline (Var _ _) = True
-shouldInline (NumericLiteral _ _) = True
-shouldInline (StringLiteral _ _) = True
-shouldInline (BooleanLiteral _ _) = True
-shouldInline (Indexer _ index val) = shouldInline index && shouldInline val
+shouldInline (Var _) = True
+shouldInline (NumericLiteral _) = True
+shouldInline (StringLiteral _) = True
+shouldInline (BooleanLiteral _) = True
+shouldInline (Indexer index val) = shouldInline index && shouldInline val
 shouldInline _ = False
 
 etaConvert :: AST -> AST
 etaConvert = everywhere convert
   where
   convert :: AST -> AST
-  convert (Block ss [Return _ (App _ (Function _ _ Nothing idents block@(Block _ body)) args)])
+  convert (Block [Return (App (Function _ Nothing idents block@(Block body)) args)])
     | all shouldInline args &&
-      not (any (`isRebound` block) (map (\t->Var Nothing (snd t)) idents)) &&
+      not (any (`isRebound` block) (map (\t->Var (snd t)) idents)) &&
       not (any (`isRebound` block) args)
-      = Block ss (map (replaceIdents (zipWith (\t a -> (snd t, a)) idents args)) body)
-  convert (Function _ _ Nothing [] (Block _ [Return _ (App _ fn [])])) = fn
+      = Block (map (replaceIdents (zipWith (\t a -> (snd t, a)) idents args)) body)
+  convert (Function _ Nothing [] (Block [Return (App fn [])])) = fn
   convert js = js
 
 
@@ -61,38 +61,38 @@ unThunk :: AST -> AST
 unThunk = everywhere convert
   where
   convert :: AST -> AST
-  convert (Block ss []) = Block ss []
-  convert (Block ss jss) =
+  convert (Block []) = Block []
+  convert (Block jss) =
     case last jss of
-      Return _ (App _ (Function _ (TypeSpecSeq Auto Nothing) Nothing [] (Block _ body)) []) -> Block ss $ init jss ++ body
-      _ -> Block ss jss
+      Return (App (Function (TypeSpecSeq Auto Nothing) Nothing [] (Block body)) []) -> Block $ init jss ++ body
+      _ -> Block jss
   convert js = js
 
 evaluateIifes :: AST -> AST
 evaluateIifes = everywhere convert
   where
   convert :: AST -> AST
-  convert (App _ (Function _ _ Nothing [] (Block _ [Return _ ret])) []) = ret
-  convert (App _ (Function _ _ Nothing idents (Block _ [Return ss ret])) [])
+  convert (App (Function _ Nothing [] (Block [Return ret])) []) = ret
+  convert (App (Function _ Nothing idents (Block [Return ret])) [])
     | not (any (\t -> (snd t) `isReassigned` ret) idents) =
-        replaceIdents (map (\t -> ((snd t), Var ss C.undefined)) idents) ret
+        replaceIdents (map (\t -> ((snd t), Var C.undefined)) idents) ret
   convert js = js
 
 inlineCommonValues :: AST -> AST
 inlineCommonValues = everywhere convert
   where
   convert :: AST -> AST
-  convert (App ss fn [dict])
-    | isDict' [semiringNumber, semiringInt] dict && isDict fnZero fn = NumericLiteral ss (Left 0)
-    | isDict' [semiringNumber, semiringInt] dict && isDict fnOne fn = NumericLiteral ss (Left 1)
-    | isDict boundedBoolean dict && isDict fnBottom fn = BooleanLiteral ss False
-    | isDict boundedBoolean dict && isDict fnTop fn = BooleanLiteral ss True
-  convert (App ss (App _ fn [dict]) [x])
-    | isDict ringInt dict && isDict fnNegate fn = Unary ss Negate (unbox x $ snd ringInt)
-  convert (App ss (App _ (App _ fn [dict]) [x]) [y])
-    | isDict semiringInt dict && isDict fnAdd fn = intOp ss Add semiringInt x y
-    | isDict semiringInt dict && isDict fnMultiply fn = intOp ss Multiply semiringInt x y
-    | isDict ringInt dict && isDict fnSubtract fn = intOp ss Subtract ringInt x y
+  convert (App fn [dict])
+    | isDict' [semiringNumber, semiringInt] dict && isDict fnZero fn = NumericLiteral (Left 0)
+    | isDict' [semiringNumber, semiringInt] dict && isDict fnOne fn = NumericLiteral (Left 1)
+    | isDict boundedBoolean dict && isDict fnBottom fn = BooleanLiteral False
+    | isDict boundedBoolean dict && isDict fnTop fn = BooleanLiteral True
+  convert (App (App fn [dict]) [x])
+    | isDict ringInt dict && isDict fnNegate fn = Unary Negate (unbox x $ snd ringInt)
+  convert (App (App (App fn [dict]) [x]) [y])
+    | isDict semiringInt dict && isDict fnAdd fn = intOp Add semiringInt x y
+    | isDict semiringInt dict && isDict fnMultiply fn = intOp Multiply semiringInt x y
+    | isDict ringInt dict && isDict fnSubtract fn = intOp Subtract ringInt x y
   convert other = other
   fnZero = (C.dataSemiring, C.zero)
   fnOne = (C.dataSemiring, C.one)
@@ -102,14 +102,14 @@ inlineCommonValues = everywhere convert
   fnMultiply = (C.dataSemiring, C.mul)
   fnSubtract = (C.dataRing, C.sub)
   fnNegate = (C.dataRing, C.negate)
-  intOp ss op (_, d) x y = Binary ss op (unbox x d) (unbox y d)
+  intOp op (_, d) x y = Binary op (unbox x d) (unbox y d)
 
 inlineVariables :: AST -> AST
 inlineVariables = everywhere $ removeFromBlock go
   where
   go :: [AST] -> [AST]
   go [] = []
-  go (VariableIntroduction _ var (Just js) : sts)
+  go (VariableIntroduction var _ (Just js) : sts)
     | shouldInline js && not (any (isReassigned var) sts) && not (any (isRebound js) sts) && not (any (isUpdated var) sts) =
       go (map (replaceIdent var js) sts)
   go (s:sts) = s : go sts
@@ -170,8 +170,8 @@ inlineCommonOperators = everywhereTopDown $ applyAll $
   , binary' C.dataIntBits C.zshr ZeroFillShiftRight
   , unary'  C.dataIntBits C.complement BitwiseNot
 
-  , inlineNonClassFunction (isModFn (C.dataFunction, C.apply)) $ \f x -> App Nothing f [x]
-  , inlineNonClassFunction (isModFn (C.dataFunction, C.applyFlipped)) $ \x f -> App Nothing f [x]
+  , inlineNonClassFunction (isModFn (C.dataFunction, C.apply)) $ \f x -> App f [x]
+  , inlineNonClassFunction (isModFn (C.dataFunction, C.applyFlipped)) $ \x f -> App f [x]
   --, inlineNonClassFunction (isModFnWithDict (C.dataArray, C.unsafeIndex)) $ flip (Indexer Nothing)
   ] -- ++
   -- [ fn | i <- [0..10], fn <- [ mkFn i, runFn i ] ] ++
@@ -181,93 +181,95 @@ inlineCommonOperators = everywhereTopDown $ applyAll $
   binary :: (Text, PSString) -> (Text, PSString) -> BinaryOperator -> AST -> AST
   binary dict@(_, d) fns op = convert where
     convert :: AST -> AST
-    convert (App ss (App _ (App _ fn [dict']) [x]) [y])
-      | isDict dict dict' && isDict fns fn = Binary ss op (unbox x d) (unbox y d)
+    convert (App (App (App fn [dict']) [x]) [y])
+      | isDict dict dict' && isDict fns fn = Binary op (unbox x d) (unbox y d)
     convert other = other
   binary' :: Text -> PSString -> BinaryOperator -> AST -> AST
   binary' moduleName opString op = convert where
     convert :: AST -> AST
-    convert (App ss (App _ fn [x]) [y]) | isDict (moduleName, opString) fn = Binary ss op (unbox x mn) (unbox y mn)
+    convert (App (App fn [x]) [y]) | isDict (moduleName, opString) fn = Binary op (unbox x mn) (unbox y mn)
     convert other = other
     mn :: PSString
     mn = mkString moduleName
   unary :: (Text, PSString) -> (Text, PSString) -> UnaryOperator -> AST -> AST
   unary dicts@(_, d) fns op = convert where
     convert :: AST -> AST
-    convert (App ss (App _ fn [dict']) [x]) | isDict dicts dict' && isDict fns fn = Unary ss op (unbox x d)
+    convert (App (App fn [dict']) [x]) | isDict dicts dict' && isDict fns fn = Unary op (unbox x d)
     convert other = other
   unary' :: Text -> PSString -> UnaryOperator -> AST -> AST
   unary' moduleName fnName op = convert where
     convert :: AST -> AST
-    convert (App ss fn [x]) | isDict (moduleName, fnName) fn = Unary ss op (unbox x fnName)
+    convert (App fn [x]) | isDict (moduleName, fnName) fn = Unary op (unbox x fnName)
     convert other = other
 
   mkFn :: Int -> AST -> AST
-  mkFn = mkFn' C.dataFunctionUncurried C.mkFn $ \ss1 ss2 ss3 args il ->
-    Function ss1 (TypeSpecSeq Auto Nothing) Nothing args (Block ss2 [Return ss3 il])
+  mkFn = mkFn' C.dataFunctionUncurried C.mkFn $ \args il ->
+    Function (TypeSpecSeq Auto Nothing) Nothing args (Block [Return il])
 
   mkEffFn :: Text -> Text -> Int -> AST -> AST
-  mkEffFn modName fnName = mkFn' modName fnName $ \ss1 ss2 ss3 args il ->
-    Function ss1 (TypeSpecSeq Auto Nothing) Nothing args (Block ss2 [Return ss3 (App ss3 il [])])
+  mkEffFn modName fnName = mkFn' modName fnName $ \args il ->
+    Function (TypeSpecSeq Auto Nothing) Nothing args (Block [Return (App il [])])
 
-  mkFn' :: Text -> Text -> (Maybe SourceSpan -> Maybe SourceSpan -> Maybe SourceSpan -> [(TypeSpecSeq,Text)] -> AST -> AST) -> Int -> AST -> AST
+  mkFn' :: Text -> Text -> ([(TypeSpecSeq,Text)] -> AST -> AST) -> Int -> AST -> AST
   mkFn' modName fnName res 0 = convert where
     convert :: AST -> AST
-    convert (App _ mkFnN [Function s1 (TypeSpecSeq Auto Nothing) Nothing [_] (Block s2 [Return s3 il])]) | isNFn modName fnName 0 mkFnN =
-      res s1 s2 s3 [] il
+    convert (App mkFnN [Function (TypeSpecSeq Auto Nothing) Nothing [_] (Block [Return il])]) | isNFn modName fnName 0 mkFnN =
+      res [] il
     convert other = other
   mkFn' modName fnName res n = convert where
     convert :: AST -> AST
-    convert orig@(App ss mkFnN [fn]) | isNFn modName fnName n mkFnN =
+    convert orig@(App mkFnN [fn]) | isNFn modName fnName n mkFnN =
       case collectArgs n [] fn of
-        Just (args, [Return ss' ret]) -> res ss ss ss' args ret
+        Just (args, [Return ret]) -> res args ret
         _ -> orig
     convert other = other
     collectArgs :: Int -> [(TypeSpecSeq,Text)] -> AST -> Maybe ([(TypeSpecSeq,Text)], [AST])
-    collectArgs 1 acc (Function _ _ Nothing [oneArg] (Block _ il)) | length acc == n - 1 = Just (reverse (oneArg : acc), il)
-    collectArgs m acc (Function _ _ Nothing [oneArg] (Block _ [Return _ ret])) = collectArgs (m - 1) (oneArg : acc) ret
+    collectArgs 1 acc (Function _ Nothing [oneArg] (Block il)) | length acc == n - 1 = Just (reverse (oneArg : acc), il)
+    collectArgs m acc (Function _ Nothing [oneArg] (Block [Return ret])) = collectArgs (m - 1) (oneArg : acc) ret
     collectArgs _ _   _ = Nothing
 
   isNFn :: Text -> Text -> Int -> AST -> Bool
-  isNFn expectMod prefix n (Indexer _ (Var _ name) (Var _ modName)) | modName == expectMod =
+  isNFn expectMod prefix n (Indexer (Var name) (Var modName)) | modName == expectMod =
     name == fromString (T.unpack prefix <> show n)
   isNFn _ _ _ _ = False
 
   runFn :: Int -> AST -> AST
-  runFn = runFn' C.dataFunctionUncurried C.runFn (\ss f args ->
-                                                    let len = length args
-                                                        typ = mkString $ "Fn" <> (T.pack . show $ len) in
-                                                    if len > 0
-                                                      then App ss (App Nothing (StringLiteral Nothing typ) [f]) args
-                                                      else App ss f args)
+  runFn = runFn' C.dataFunctionUncurried C.runFn
+    (\f args ->
+       let len = length args
+           typ = mkString $ "Fn" <> (T.pack . show $ len) in
+         if len > 0
+         then App (App (StringLiteral typ) [f]) args
+         else App f args)
+    
   runEffFn :: Text -> Text -> Int -> AST -> AST
-  runEffFn modName fnName = runFn' modName fnName $ \ss fn acc ->
-    Function ss (TypeSpecSeq Auto Nothing) Nothing [] (Block ss [Return ss (App ss fn acc)])
+  runEffFn modName fnName = runFn' modName fnName $ \fn acc ->
+    Function (TypeSpecSeq Auto Nothing) Nothing [] (Block [Return (App fn acc)])
 
-  runFn' :: Text -> Text -> (Maybe SourceSpan -> AST -> [AST] -> AST) -> Int -> AST -> AST
+  runFn' :: Text -> Text -> (AST -> [AST] -> AST) -> Int -> AST -> AST
   runFn' modName runFnName res n = convert where
     convert :: AST -> AST
     convert il = fromMaybe il $ go n [] il
 
     go :: Int -> [AST] -> AST -> Maybe AST
-    go 0 acc (App ss runFnN [fn]) | isNFn modName runFnName n runFnN && length acc == n =
-      Just $ res ss fn acc
-    go m acc (App _ lhs [arg]) = go (m - 1) (arg : acc) lhs
+    go 0 acc (App runFnN [fn]) | isNFn modName runFnName n runFnN && length acc == n =
+      Just $ res fn acc
+    go m acc (App lhs [arg]) = go (m - 1) (arg : acc) lhs
     go _ _   _ = Nothing
 
   inlineNonClassFunction :: (AST -> Bool) -> (AST -> AST -> AST) -> AST -> AST
   inlineNonClassFunction p f = convert where
     convert :: AST -> AST
-    convert (App _ (App _ op' [x]) [y]) | p op' = f x y
+    convert (App (App op' [x]) [y]) | p op' = f x y
     convert other = other
 
   isModFn :: (Text, PSString) -> AST -> Bool
-  isModFn (m, op) (Indexer _ (Var _ op') (Var _ m')) =
+  isModFn (m, op) (Indexer (Var op') (Var m')) =
     m == m' && decodeString op == Just op'
   isModFn _ _ = False
 
   isModFnWithDict :: (Text, PSString) -> AST -> Bool
-  isModFnWithDict (m, op) (App _ (Indexer _ (Var _ op') (Var _ m')) [Var _ _]) =
+  isModFnWithDict (m, op) (App (Indexer (Var op') (Var m')) [Var _]) =
     m == m' && decodeString op == Just op'
   isModFnWithDict _ _ = False
 
@@ -276,25 +278,25 @@ inlineCommonOperators = everywhereTopDown $ applyAll $
 inlineFnComposition :: forall m. MonadSupply m => AST -> m AST
 inlineFnComposition = everywhereTopDownM convert where
   convert :: AST -> m AST
-  convert (App s1 (App s2 (App _ (App _ fn [dict']) [x]) [y]) [z])
-    | isFnCompose dict' fn = return $ App s1 x [App s2 y [z]]
-    | isFnComposeFlipped dict' fn = return $ App s2 y [App s1 x [z]]
-  convert app@(App ss (App _ (App _ fn [dict']) _) _)
-    | isFnCompose dict' fn || isFnComposeFlipped dict' fn = mkApps ss <$> goApps app <*> freshName'
+  convert (App (App (App (App fn [dict']) [x]) [y]) [z])
+    | isFnCompose dict' fn = return $ App x [App y [z]]
+    | isFnComposeFlipped dict' fn = return $ App y [App x [z]]
+  convert app@(App (App (App fn [dict']) _) _)
+    | isFnCompose dict' fn || isFnComposeFlipped dict' fn = mkApps <$> goApps app <*> freshName'
   convert other = return other
 
-  mkApps :: Maybe SourceSpan -> [Either AST (Text, AST)] -> Text -> AST
-  mkApps ss fns a = App ss (Function ss (TypeSpecSeq Auto Nothing) Nothing [] (Block ss $ vars <> [Return Nothing comp])) []
+  mkApps :: [Either AST (Text, AST)] -> Text -> AST
+  mkApps fns a = App (Function (TypeSpecSeq Auto Nothing) Nothing [] (Block $ vars <> [Return comp])) []
     where
-    vars = uncurry (VariableIntroduction ss) . fmap Just <$> rights fns
-    comp = Function ss (TypeSpecSeq Auto Nothing) Nothing [((TypeSpecSeq Auto Nothing),a)] (Block ss [Return Nothing apps])
-    apps = foldr (\fn acc -> App ss (mkApp fn) [acc]) (Var ss a) fns
+    vars = uncurry (\id b -> VariableIntroduction id (TypeSpecSeq Auto Nothing) b) . fmap Just <$> rights fns
+    comp = Function (TypeSpecSeq Auto Nothing) Nothing [((TypeSpecSeq Auto Nothing),a)] (Block [Return apps])
+    apps = foldr (\fn acc -> App (mkApp fn) [acc]) (Var a) fns
 
   mkApp :: Either AST (Text, AST) -> AST
-  mkApp = either id $ \(name, arg) -> Var (getSourceSpan arg) name
+  mkApp = either id $ \(name, arg) -> Var name
 
   goApps :: AST -> m [Either AST (Text, AST)]
-  goApps (App _ (App _ (App _ fn [dict']) [x]) [y])
+  goApps (App (App (App fn [dict']) [x]) [y])
     | isFnCompose dict' fn = mappend <$> goApps x <*> goApps y
     | isFnComposeFlipped dict' fn = mappend <$> goApps y <*> goApps x
   goApps app@(App {}) = pure . Right . (,app) <$> freshName'
@@ -314,16 +316,16 @@ inlineFnComposition = everywhereTopDownM convert where
 
 inlineUnsafeCoerce :: AST -> AST
 inlineUnsafeCoerce = everywhereTopDown convert where
-  convert (App _ (Indexer _ (Var _ unsafeCoerceFn) (Var _ unsafeCoerce)) [ comp ])
+  convert (App (Indexer (Var unsafeCoerceFn) (Var unsafeCoerce)) [ comp ])
     | unsafeCoerceFn == C.unsafeCoerceFn && unsafeCoerce == C.unsafeCoerce
     = comp
   convert other = other
 
 inlineUnsafePartial :: AST -> AST
 inlineUnsafePartial = everywhereTopDown convert where
-  convert (App ss fn [ comp ])
+  convert (App fn [ comp ])
     | isDict fnUnsafePartial fn
-    = App ss comp []
+    = App comp []
     where
       fnUnsafePartial :: forall a b. (IsString a, IsString b) => (a, b)
       fnUnsafePartial = (C.partialUnsafe, C.unsafePartial)
@@ -442,7 +444,7 @@ unbox e d = select . inlineCommonValues $ inlineCommonOperators e
       Indexer{} -> unbox' e'
       _ -> e'
   unbox' :: AST -> AST
-  unbox' e' = maybe e' (\t -> App Nothing (StringLiteral Nothing t) [e']) $ unboxType d
+  unbox' e' = maybe e' (\t -> App (StringLiteral t) [e']) $ unboxType d
 
 unboxType :: PSString -> Maybe PSString
 unboxType s = do

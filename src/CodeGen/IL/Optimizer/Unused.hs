@@ -17,12 +17,12 @@ removeCodeAfterReturnStatements = everywhere (removeFromBlock go)
   go :: [AST] -> [AST]
   go jss | not (any isReturn jss) = jss
          | otherwise = let (body, ret : _) = break isReturn jss in body ++ [ret]
-  isReturn (Return _ _) = True
-  isReturn (ReturnNoResult _) = True
+  isReturn (Return _) = True
+  isReturn (ReturnNoResult) = True
   isReturn _ = False
 
 removeUndefinedApp :: AST -> AST
 removeUndefinedApp = everywhere convert
   where
-  convert (App ss fn [Var _ arg]) | arg == C.undefined = App ss fn []
+  convert (App fn [Var arg]) | arg == C.undefined = App fn []
   convert js = js
